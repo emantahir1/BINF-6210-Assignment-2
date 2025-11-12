@@ -168,35 +168,83 @@ country_map <- tibble::tibble(
   )
 )
 
+
+# Edit 2: Robust latitude-band assignment for H1
+# Replaced text-based classification with coordinate-based bands (|lat| < 23.5 = Tropical)
+# Added centroid-based imputation for records missing coordinates
+                          
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(sf)
+  library(rnaturalearth)
+  library(rnaturalearthdata)
+  library(stringr)
+})
+
+# helper: normalize names for fuzzy join
+.norm <- function(x) {
+  x <- tolower(gsub("[^A-Za-z ]", " ", x))
+  str_squish(x)
+}
+
+df_geo <- df_geo %>% mutate(.row_id = dplyr::row_number())
+
+# 1) derive band directly from latitude (safe numeric)
 df_geo <- df_geo %>%
-  left_join(country_map, by = c("country/ocean" = "country_ocean_label")) %>%
+  mutate(lat_num = suppressWarnings(as.numeric(lat))) %>%
   mutate(
-    ## Priority order: use coords if we have them; else ocean words; else country map.
-    basin = coalesce(basin_from_coords, basin_from_words, basin_map, "Unknown/Offshore")
+    band_from_coords = dplyr::case_when(
+      !is.na(lat_num) & abs(lat_num) < 23.5 ~ "Tropical",
+      !is.na(lat_num)                        ~ "Temperate",
+      TRUE ~ NA_character_
+    )
+  )
+
+# 2) impute band using country centroid latitude when coords are missing
+# choose a country-like column if available
+if ("country" %in% names(df_geo)) {
+  country_col <- "country"
+} else if ("country/ocean" %in% names(df_geo)) {
+  country_col <- "country/ocean"
+} else {
+  country_col <- NA_character_
+}
+
+if (!is.na(country_col)) {
+  # Natural Earth countries: fix invalid geometries, use point-on-surface for stable "centroid"
+  ne <- rnaturalearth::ne_countries(scale = 110, returnclass = "sf") %>%
+    dplyr::select(name_long, geometry) %>%
+    sf::st_make_valid()
+  rep_pts <- sf::st_point_on_surface(ne)
+  ne <- ne %>%
+    mutate(lat_cen = as.numeric(sf::st_coordinates(rep_pts)[, 2])) %>%
+    select(name_long, lat_cen) %>%
+    mutate(.ne_norm = .norm(name_long))
+  
+  df_geo <- df_geo %>%
+    mutate(.country_norm = .norm(.data[[country_col]])) %>%
+    left_join(ne %>% select(.ne_norm, lat_cen),
+              by = c(".country_norm" = ".ne_norm")) %>%
+    mutate(
+      band_from_country = dplyr::case_when(
+        is.na(band_from_coords) & !is.na(lat_cen) & abs(lat_cen) < 23.5 ~ "Tropical",
+        is.na(band_from_coords) & !is.na(lat_cen)                        ~ "Temperate",
+        TRUE ~ NA_character_
+      )
+    )
+} else {
+  df_geo <- df_geo %>% mutate(band_from_country = NA_character_)
+}
+
+# 3) finalize band label (coords > country centroid > existing)
+df_geo <- df_geo %>%
+  mutate(
+    band = dplyr::coalesce(band_from_coords, band_from_country),
+    band = factor(band, levels = c("Tropical", "Temperate"))
   ) %>%
-  select(-basin_map)
-
-## 2g) STEP: Collapse any leftover variations to the five major basins.
-## WHY: keep one consistent level per basin (Atlantic / Indian / Pacific / Arctic / Southern).
-df_geo <- df_geo %>%
-  mutate(basin = case_when(
-    str_detect(basin, regex("Atlantic", TRUE)) ~ "Atlantic",
-    str_detect(basin, regex("Pacific",  TRUE)) ~ "Pacific",
-    str_detect(basin, regex("Indian",   TRUE)) ~ "Indian",
-    str_detect(basin, regex("Arctic",   TRUE)) ~ "Arctic",
-    str_detect(basin, regex("Southern", TRUE)) ~ "Southern",
-    TRUE ~ basin
-  ))
-
-## 2h) STEP: Make a latitude band (‘Tropical’ vs ‘Temperate’) for H1.
-## WHY: we will compare rarefied BIN richness between these two bands.
-df_geo <- df_geo %>%
-  mutate(band = case_when(
-    !is.na(lat) & abs(lat) <= 23.5 ~ "Tropical",
-    !is.na(lat) & abs(lat) >  23.5 ~ "Temperate",
-    TRUE ~ NA_character_
-  ))
-
+  select(-.row_id, -lat_num, -band_from_coords, -band_from_country,
+         -lat_cen, -.country_norm)
+                          
 ##========================  3) FILTER FOR ANALYSIS  ================================
 ## GOAL: keep only rows that make a fair presence/absence comparison possible.
 
