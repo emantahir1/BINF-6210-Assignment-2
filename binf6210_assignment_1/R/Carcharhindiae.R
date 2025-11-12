@@ -386,6 +386,65 @@ if (exists("df_use") && nrow(df_use) > 0) {
   cat("# H1: skipped (no filtered data)\n")
 }
 
+# Edit 1: Rarefaction-based richness test
+# Added rarefaction and permutation test to standardize sampling effort and formally test H1 (Tropical > Temperate)
+                          
+# 0) Keep only valid bands (Tropical/Temperate) and valid basins
+valid <- df_use %>%
+  filter(!is.na(band), band %in% c("Tropical", "Temperate")) %>%
+  filter(!is.na(basin), basin != "Unknown/Offshore")
+
+if (nrow(valid) == 0L || length(unique(valid$band)) < 2L) {
+  cat("# H1 rarefaction: skipped (need both Tropical and Temperate)\n")
+} else {
+  
+  # 1) Choose a global draw size based on the smallest (basin, band) cell
+  cell_counts <- valid %>% count(basin, band, name = "n_cell")
+  n_draw <- max(5L, min(cell_counts$n_cell, na.rm = TRUE))  # lower bound avoids trivial draws
+  cat("# H1 rarefaction n_draw =", n_draw, "\n")
+  
+  # 2) Rarefaction helper: subsample to n_draw and count unique BINs
+  rarefy_one <- function(d, n_draw, reps = 499) {
+    if (nrow(d) < n_draw) return(NA_real_)
+    mean(replicate(reps, {
+      s <- d[sample.int(nrow(d), n_draw), , drop = FALSE]
+      dplyr::n_distinct(s$bin_uri)
+    }), na.rm = TRUE)
+  }
+  
+  # 3) Rarefy per (basin, band), then average within each band
+  rich_by_band <- valid %>%
+    group_by(band, basin) %>%
+    summarise(rich_raref = rarefy_one(cur_data_all(), n_draw, reps = 499),
+              .groups = "drop") %>%
+    filter(!is.na(rich_raref)) %>%
+    group_by(band) %>%
+    summarise(mean_rich = mean(rich_raref), .groups = "drop")
+  
+  # 4) Test only if both bands have finite means
+  if (nrow(rich_by_band) == 2L && all(is.finite(rich_by_band$mean_rich))) {
+    set.seed(6210)
+    
+    # Observed effect: Tropical − Temperate (rarefied means)
+    obs <- with(rich_by_band,
+                mean_rich[band == "Tropical"] - mean_rich[band == "Temperate"])
+    
+    # Permutation test (one-sided; H1: Tropical > Temperate)
+    perm <- replicate(3000, {
+      shuffled <- sample(rich_by_band$band)
+      mean(rich_by_band$mean_rich[shuffled == "Tropical"]) -
+        mean(rich_by_band$mean_rich[shuffled == "Temperate"])
+    })
+    p_value <- mean(perm <= 0)  # proportion of permuted diffs <= 0
+    
+    cat("H1 rarefied richness difference (Tropical − Temperate): ",
+        round(obs, 2), "   p-value ≈ ", round(p_value, 3), "\n", sep = "")
+  } else {
+    cat("# H1 rarefaction: insufficient finite means across bands.\n")
+    print(rich_by_band)
+  }
+}                          
+                          
 ## H2: (Adjacent > Distant?) Are Jaccard similarities higher for adjacent basins?
 
 if (exists("sim_jac") && nrow(sim_jac) >= 2) {
