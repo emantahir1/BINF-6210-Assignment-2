@@ -495,56 +495,90 @@ if (nrow(valid) == 0L || length(unique(valid$band)) < 2L) {
                           
 ## H2: (Adjacent > Distant?) Are Jaccard similarities higher for adjacent basins?
 
-if (exists("sim_jac") && nrow(sim_jac) >= 2) {
 
-# Pair table from similarity matrix
-  pairs <- as.data.frame(as.table(sim_jac), stringsAsFactors = FALSE) |>
-    dplyr::rename(a = Var1, b = Var2, sim = Freq) |>
-    dplyr::filter(a != b) |>
-    dplyr::mutate(a = as.character(a), b = as.character(b)) |>
-    dplyr::mutate(key_sorted = paste(pmin(a,b), pmax(a,b), sep = "|")) |>
-    dplyr::distinct(key_sorted, .keep_all = TRUE)
-  
-# Define adjacency ONLY for basins present
-  present <- sort(unique(c(pairs$a, pairs$b)))
-  
-# Start empty, then add rules that apply to your data
-  adj_keys <- character(0)
-  
-# Core majors
-  if (all(c("Indian","Pacific") %in% present))   adj_keys <- c(adj_keys, "Indian|Pacific")
-  if (all(c("North Pacific","South Pacific") %in% present)) adj_keys <- c(adj_keys, "North Pacific|South Pacific")
-  if (all(c("North Atlantic","South Atlantic") %in% present)) adj_keys <- c(adj_keys, "North Atlantic|South Atlantic")
-  
-# Poles to neighbors
-  if (all(c("Atlantic","Arctic") %in% present))  adj_keys <- c(adj_keys, "Arctic|Atlantic")
-  if (all(c("Pacific","Arctic") %in% present))   adj_keys <- c(adj_keys, "Arctic|Pacific")
-  if (all(c("Indian","Southern") %in% present))  adj_keys <- c(adj_keys, "Indian|Southern")
-  if (all(c("Pacific","Southern") %in% present)) adj_keys <- c(adj_keys, "Pacific|Southern")
-  if (all(c("Atlantic","Southern") %in% present))adj_keys <- c(adj_keys, "Atlantic|Southern")
-  
-# Label groups
-  pairs <- pairs |>
-    dplyr::mutate(group = ifelse(key_sorted %in% adj_keys, "Adjacent", "Distant"))
-  
-  if (any(pairs$group == "Adjacent") && any(pairs$group == "Distant")) {
-    obs <- with(pairs, mean(sim[group == "Adjacent"]) - mean(sim[group == "Distant"]))
-    set.seed(6210)
-    perm <- replicate(3000, {
-      lab <- sample(pairs$group)  # shuffle labels
-      mean(pairs$sim[lab == "Adjacent"]) - mean(pairs$sim[lab == "Distant"])
-    })
-    p_one_sided <- mean(perm <= 0)  # H2: Adjacent > Distant
-    
-    cat("# H2 (Adj − Dist Jaccard): ",
-        round(obs,3), " ; permutation p ≈ ", round(p_one_sided,3), "\n", sep = "")
-  } else {
-    cat("# H2: skipped — need both Adjacent and Distant pairs present.\n")
-  }
+# Edit 3: Graph-based adjacency analysis for H2
+# Replaced manual/heuristic adjacency rules with an explicit adjacency graph
+# Based on standardized ocean basins (Atlantic / Indian / Pacific / Arctic / Southern)
+# Added effect size (Adjacent − Distant), bootstrap 95% CI, and permutation test
+
+suppressPackageStartupMessages(library(dplyr))
+
+if (!exists("sim_jac")) {
+  cat("# H2 skipped: sim_jac not found\n")
+
 } else {
-  cat("# H2: skipped — run Fig 2 to create `sim_jac`.\n")
-}
+  sim_mat <- as.matrix(sim_jac)
 
+  # 1) Standardize basin names to five major oceans
+  std <- function(x) case_when(
+    grepl("Atlantic", x, TRUE) ~ "Atlantic",
+    grepl("Pacific",  x, TRUE) ~ "Pacific",
+    grepl("Indian",   x, TRUE) ~ "Indian",
+    grepl("Arctic",   x, TRUE) ~ "Arctic",
+    grepl("Southern", x, TRUE) ~ "Southern",
+    TRUE ~ NA_character_
+  )
+  rownames(sim_mat) <- std(rownames(sim_mat))
+  colnames(sim_mat) <- std(colnames(sim_mat))
+  sim_mat <- sim_mat[!is.na(rownames(sim_mat)), !is.na(colnames(sim_mat)), drop = FALSE]
+  sim_mat <- sim_mat[!duplicated(rownames(sim_mat)), !duplicated(colnames(sim_mat)), drop = FALSE]
+
+  if (min(dim(sim_mat)) < 2) {
+    cat("# H2 skipped: fewer than 2 basins after standardization\n")
+  } else {
+
+    # 2) Build unique basin pairs
+    pair_df <- as.data.frame(as.table(sim_mat), stringsAsFactors = FALSE) |>
+      rename(a = Var1, b = Var2, sim = Freq) |>
+      filter(a != b) |>
+      mutate(a2 = pmin(a, b), b2 = pmax(a, b)) |>
+      distinct(a2, b2, .keep_all = TRUE)
+
+    # 3) Define adjacency edges (Atlantic–Pacific excluded)
+    edges_all <- rbind(
+      c("Atlantic","Arctic"),
+      c("Atlantic","Indian"),
+      c("Atlantic","Southern"),
+      c("Pacific","Arctic"),
+      c("Pacific","Indian"),
+      c("Pacific","Southern"),
+      c("Indian","Southern"),
+      c("Arctic","Southern")
+    )
+    present <- sort(unique(c(pair_df$a, pair_df$b)))
+    keep <- apply(edges_all, 1, function(e) all(e %in% present))
+    edges <- edges_all[keep, , drop = FALSE]
+
+    # 4) Label Adjacent vs Distant
+    is_adj <- apply(pair_df[, c("a","b")], 1, function(x)
+      any(apply(edges, 1, function(e) all(x == e) || all(rev(x) == e))))
+    pair_df$group <- ifelse(is_adj, "Adjacent", "Distant")
+
+    if (!any(is_adj) || all(is_adj)) {
+      cat("# H2 skipped: need both Adjacent and Distant groups\n")
+    } else {
+
+      # 5) Effect size, bootstrap CI, and permutation test
+      set.seed(6210)
+      obs <- with(pair_df, mean(sim[group == "Adjacent"]) - mean(sim[group == "Distant"]))
+      boot <- replicate(1000, {
+        mA <- mean(sample(pair_df$sim[pair_df$group == "Adjacent"], replace = TRUE))
+        mD <- mean(sample(pair_df$sim[pair_df$group == "Distant"],  replace = TRUE))
+        mA - mD
+      })
+      ci <- quantile(boot, c(.025, .975), na.rm = TRUE)
+      perm <- replicate(2000, {
+        lab <- sample(pair_df$group)
+        mean(pair_df$sim[lab == "Adjacent"]) - mean(pair_df$sim[lab == "Distant"])
+      })
+      p <- mean(perm >= obs)
+
+      cat(sprintf("H2 (Adj−Dist): effect=%.3f; 95%% CI [%.3f, %.3f]; p≈%.3f\n",
+                  obs, ci[1], ci[2], p))
+    }
+  }
+}
+                          
 ##========================  FINISH =================
 
 message("Done. Figures saved in ../figures/")
