@@ -168,6 +168,22 @@ country_map <- tibble::tibble(
   )
 )
 
+df_geo <- df_geo %>%
+  left_join(country_map, by = c("country/ocean" = "country_ocean_label")) %>%
+  mutate(
+    basin = coalesce(basin_from_coords, basin_from_words, basin_map, "Unknown/Offshore")
+  ) %>%
+  select(-basin_map)
+
+df_geo <- df_geo %>%
+  mutate(basin = case_when(
+    str_detect(basin, regex("Atlantic", TRUE)) ~ "Atlantic",
+    str_detect(basin, regex("Pacific",  TRUE)) ~ "Pacific",
+    str_detect(basin, regex("Indian",   TRUE)) ~ "Indian",
+    str_detect(basin, regex("Arctic",   TRUE)) ~ "Arctic",
+    str_detect(basin, regex("Southern", TRUE)) ~ "Southern",
+    TRUE ~ basin
+  ))
 
 # Edit 2: Robust latitude-band assignment for H1
 # Replaced text-based classification with coordinate-based bands (|lat| < 23.5 = Tropical)
