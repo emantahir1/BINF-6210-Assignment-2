@@ -1,5 +1,8 @@
 ###############################################################
 ## Author: Eman Tahir | Date: 2025-10
+## Contributors:
+##  Secondary Contributor: Kexin Gong
+##  Reviewed by: Stephanie Saab, Iroayo Toki
 ## Course: Software Tools (BINF6210)
 ## Project: Requiem Sharks on BOLD: BIN Richness and Basin Similarity
 ###############################################################
